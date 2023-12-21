@@ -11493,17 +11493,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E, bool PostponedPHIs) {
       Value *PO = LI->getPointerOperand();
       if (E->State == TreeEntry::Vectorize) {
         NewLI = Builder.CreateAlignedLoad(VecTy, PO, LI->getAlign());
-
-        // The pointer operand uses an in-tree scalar so we add the new
-        // LoadInst to ExternalUses list to make sure that an extract will
-        // be generated in the future.
-        if (isa<Instruction>(PO)) {
-          if (TreeEntry *Entry = getTreeEntry(PO)) {
-            // Find which lane we need to extract.
-            unsigned FoundLane = Entry->findLaneForValue(PO);
-            ExternalUses.emplace_back(PO, NewLI, FoundLane);
-          }
-        }
       } else {
         assert((E->State == TreeEntry::ScatterVectorize ||
                 E->State == TreeEntry::PossibleStridedVectorize) &&
@@ -11538,17 +11527,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E, bool PostponedPHIs) {
       Value *Ptr = SI->getPointerOperand();
       StoreInst *ST =
           Builder.CreateAlignedStore(VecValue, Ptr, SI->getAlign());
-
-      // The pointer operand uses an in-tree scalar, so add the new StoreInst to
-      // ExternalUses to make sure that an extract will be generated in the
-      // future.
-      if (isa<Instruction>(Ptr)) {
-        if (TreeEntry *Entry = getTreeEntry(Ptr)) {
-          // Find which lane we need to extract.
-          unsigned FoundLane = Entry->findLaneForValue(Ptr);
-          ExternalUses.push_back(ExternalUser(Ptr, ST, FoundLane));
-        }
-      }
 
       Value *V = propagateMetadata(ST, E->Scalars);
 
@@ -11653,18 +11631,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E, bool PostponedPHIs) {
       SmallVector<OperandBundleDef, 1> OpBundles;
       CI->getOperandBundlesAsDefs(OpBundles);
       Value *V = Builder.CreateCall(CF, OpVecs, OpBundles);
-
-      // The scalar argument uses an in-tree scalar so we add the new vectorized
-      // call to ExternalUses list to make sure that an extract will be
-      // generated in the future.
-      if (isa_and_present<Instruction>(ScalarArg)) {
-        if (TreeEntry *Entry = getTreeEntry(ScalarArg)) {
-          // Find which lane we need to extract.
-          unsigned FoundLane = Entry->findLaneForValue(ScalarArg);
-          ExternalUses.push_back(
-              ExternalUser(ScalarArg, cast<User>(V), FoundLane));
-        }
-      }
 
       propagateIRFlags(V, E->Scalars, VL0);
       V = FinalShuffle(V, E, VecTy, IsSigned);
@@ -11897,6 +11863,12 @@ Value *BoUpSLP::vectorizeTree(
 
     Value *Vec = E->VectorizedValue;
     assert(Vec && "Can't find vectorizable value");
+
+    // Generate extract for in-tree uses if the use is scalar operand in
+    // vectorized instruction.
+    if (auto *UserVecTE = getTreeEntry(User))
+      if (doesInTreeUserNeedToExtract(Scalar, cast<Instruction>(User), TLI))
+        User = cast<llvm::User>(UserVecTE->VectorizedValue);
 
     Value *Lane = Builder.getInt32(ExternalUse.Lane);
     auto ExtractAndExtendIfNeeded = [&](Value *Vec) {
